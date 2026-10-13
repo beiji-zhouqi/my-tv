@@ -28,6 +28,17 @@ class TVListViewModel : ViewModel() {
         }
     }
 
+    fun replaceChannels(channels: List<TVViewModel>, currentPosition: Int) {
+        _tvListViewModel.value = channels.toMutableList()
+        _itemPosition.value = currentPosition
+        _itemPositionCurrent.value = currentPosition
+    }
+
+    fun clearChannels() {
+        _tvListViewModel.value = mutableListOf()
+        _itemPositionCurrent.value = null
+    }
+
     fun getTVViewModel(id: Int): TVViewModel? {
         return _tvListViewModel.value?.get(id)
     }

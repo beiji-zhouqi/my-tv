@@ -9,12 +9,20 @@ data class TV(
     var alias: String = "",
     var videoUrl: List<String>,
     var channel: String = "",
+    var sourceNames: List<String> = emptyList(),
     var logo: Any = "",
     var pid: String = "",
     var sid: String = "",
     var programType: ProgramType,
     var needToken: Boolean = false,
     var mustToken: Boolean = false,
+
+    /**
+     * Container hint for the player. Playlist URLs are frequently extension
+     * less (they redirect to a manifest), and ExoPlayer infers the type from
+     * the URL suffix — so we have to tell it explicitly.
+     */
+    var mimeType: String? = null,
 
     ) : Serializable {
 

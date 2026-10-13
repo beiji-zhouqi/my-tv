@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/main_container"
+    android:layout_width="wrap_content"
+    android:layout_height="match_parent"
+    android:orientation="horizontal"
+    android:background="@android:color/transparent">
+
+    <!-- 左侧分组菜单 -->
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/group_list"
+        android:layout_width="200dp"
+        android:layout_height="match_parent"
+        android:paddingStart="20dp"
+        android:paddingTop="30dp"
+        android:paddingEnd="10dp"
+        android:clipToPadding="false"
+        android:background="#FF151515" />
+
+    <!-- 中间频道列表 -->
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/channel_list"
+        android:layout_width="280dp"
+        android:layout_height="match_parent"
+        android:paddingStart="10dp"
+        android:paddingTop="30dp"
+        android:paddingEnd="20dp"
+        android:clipToPadding="false"
+        android:background="#FF0A0A0A" />
+
+</LinearLayout>

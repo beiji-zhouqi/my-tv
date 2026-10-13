@@ -506,10 +506,6 @@ object Request {
                             tokenFH = f
                             Log.i(TAG, "tokenFH success $tokenFH")
                         }
-                        if (c != null) {
-                            Utils.setBetween(c * 1000L)
-                            Log.i(TAG, "current time $c")
-                        }
                         listener?.onRequestFinished(null)
                     } else {
                         Log.e(TAG, "token status error")
