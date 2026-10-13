@@ -88,7 +88,7 @@ class TVViewModel(private var tv: TV) : ViewModel() {
 
     init {
         _videoUrl.value = tv.videoUrl
-        _videoIndex.value = tv.videoUrl.lastIndex
+        _videoIndex.value = 0
     }
 
     fun getRowPosition(): Int {
@@ -111,12 +111,25 @@ class TVViewModel(private var tv: TV) : ViewModel() {
         _errInfo.value = info
     }
 
+    /** Refresh metadata without restarting the currently decoded stream. */
+    fun updateTV(updated: TV) {
+        val currentUrl = _videoUrl.value?.getOrNull(_videoIndex.value ?: 0)
+        tv = updated
+        _videoUrl.value = updated.videoUrl
+        _videoIndex.value = updated.videoUrl.indexOf(currentUrl).takeIf { it >= 0 } ?: 0
+    }
+
     fun getTV(): TV {
         return tv
     }
 
     fun addYJceEPG(p: MutableList<TVProgram>) {
         _epg.value = p.map { EPG(it.name, it.start_time_stamp.toInt()) }.toMutableList()
+    }
+
+    /** Programme guide supplied by the playlist, already parsed. */
+    fun setEPG(list: List<EPG>) {
+        _epg.value = list.toMutableList()
     }
 
     fun addYEPG(p: MutableList<Program>) {

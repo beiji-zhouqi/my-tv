@@ -16,10 +16,22 @@
         app:use_controller="false" />
 
     <androidx.media3.ui.PlayerView
+        android:id="@+id/standby_player_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:alpha="0"
+        android:focusable="false"
+        app:surface_type="texture_view"
+        app:resize_mode="fill"
+        app:use_controller="false" />
+
+    <androidx.media3.ui.PlayerView
         android:id="@+id/player_view"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:layout_gravity="center"
+        app:surface_type="texture_view"
         app:resize_mode="fill"
         app:use_controller="false" />
 </FrameLayout>

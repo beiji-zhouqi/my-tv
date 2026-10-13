@@ -36,7 +36,10 @@ class InfoFragment : Fragment() {
             .into(binding.infoLogo)
 
         Log.i(TAG, "${tvViewModel.getTV().title} ${tvViewModel.epg.value}")
-        val epg = tvViewModel.epg.value?.filter { it.beginTime < Utils.getDateTimestamp() }
+        val now = Utils.getDateTimestamp()
+        val epg = tvViewModel.epg.value?.filter {
+            it.beginTime <= now && (it.endTime == null || now < it.endTime)
+        }
         if (!epg.isNullOrEmpty()) {
             binding.infoDesc.text = epg.last().title
         } else {

@@ -1,5 +1,11 @@
 package com.lizongying.mytv
 
+import android.app.UiModeManager
+import android.content.res.Configuration
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.Button
+import android.view.Gravity
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
@@ -26,38 +32,40 @@ import kotlinx.coroutines.launch
 
 class MainActivity : FragmentActivity(), Request.RequestListener {
 
+    val isTelevision: Boolean
+        get() = (getSystemService(Context.UI_MODE_SERVICE) as UiModeManager).currentModeType ==
+            Configuration.UI_MODE_TYPE_TELEVISION
+    private var touchControls: View? = null
     private var ready = 0
-    private val playerFragment = PlayerFragment()
-    private val mainFragment = MainFragment()
-    private val infoFragment = InfoFragment()
-    private val channelFragment = ChannelFragment()
-    private var timeFragment = TimeFragment()
-    private val settingFragment = SettingFragment()
-    private val errorFragment = ErrorFragment()
+    private var playerFragment = PlayerFragment()
+    private var mainFragment = MainFragment()
+    private var infoFragment = InfoFragment()
+    private var channelFragment = ChannelFragment()
+    private var settingFragment = SettingFragment()
+    private var errorFragment = ErrorFragment()
 
     private var doubleBackToExitPressedOnce = false
 
     private lateinit var gestureDetector: GestureDetector
 
     private val handler = Handler()
-    private val delayHideMain: Long = 10000
     private val delayHideSetting: Long = 10000
-
-    init {
-        lifecycleScope.launch(Dispatchers.IO) {
-            val utilsJob = async(start = CoroutineStart.LAZY) { Utils.init() }
-
-            utilsJob.start()
-
-//            utilsJob.await()
-        }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         Log.i(TAG, "onCreate")
         super.onCreate(savedInstanceState)
 
         setContentView(R.layout.activity_main)
+        supportFragmentManager.fragments.forEach { fragment ->
+            when (fragment) {
+                is PlayerFragment -> playerFragment = fragment
+                is MainFragment -> mainFragment = fragment
+                is InfoFragment -> infoFragment = fragment
+                is ChannelFragment -> channelFragment = fragment
+                is SettingFragment -> settingFragment = fragment
+                is ErrorFragment -> errorFragment = fragment
+            }
+        }
 
         Request.setRequestListener(this)
 
@@ -68,14 +76,17 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
         if (savedInstanceState == null) {
             supportFragmentManager.beginTransaction()
                 .add(R.id.main_browse_fragment, playerFragment)
-                .add(R.id.main_browse_fragment, timeFragment)
                 .add(R.id.main_browse_fragment, infoFragment)
                 .add(R.id.main_browse_fragment, channelFragment)
                 .add(R.id.main_browse_fragment, mainFragment)
-                .hide(mainFragment)
                 .commit()
         }
         gestureDetector = GestureDetector(this, GestureListener())
+        if (!isTelevision) {
+            installTouchControls()
+            supportFragmentManager.executePendingTransactions()
+            touchControls?.bringToFront()
+        }
 
         errorFragment.buttonClickListener = View.OnClickListener {
             supportFragmentManager.beginTransaction()
@@ -104,6 +115,34 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
 
     }
 
+    private fun installTouchControls() {
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+            setBackgroundColor(0xAA151515.toInt())
+        }
+        listOf("频道" to { switchMainFragment() }, "选源" to { showSourceSelection() }).forEach { (label, action) ->
+            controls.addView(Button(this).apply {
+                text = label
+                textSize = 14f
+                minWidth = dp(64)
+                minimumHeight = dp(48)
+                isFocusable = false
+                setOnClickListener { action() }
+            }, LinearLayout.LayoutParams(dp(76), dp(48)))
+        }
+        findViewById<FrameLayout>(R.id.main_browse_fragment).addView(controls,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.END))
+        touchControls = controls
+    }
+
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+
+    fun syncSourceIndex(channel: TVViewModel?) {
+        channel?.let { playerFragment.syncSourceIndex(it) }
+    }
+
     fun showInfoFragment(tvViewModel: TVViewModel) {
         infoFragment.show(tvViewModel)
         if (SP.channelNum) {
@@ -127,7 +166,6 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
 
     fun play(tvViewModel: TVViewModel) {
         playerFragment.play(tvViewModel)
-        mainFragment.view?.requestFocus()
     }
 
     fun play(itemPosition: Int) {
@@ -140,6 +178,47 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
 
     fun next() {
         mainFragment.next()
+    }
+
+    fun onPlaybackFailed(channel: TVViewModel, reason: String) {
+        mainFragment.onPlaybackFailed(channel, reason)
+    }
+
+    fun onPlaybackStarted(channel: TVViewModel) {
+        mainFragment.onPlaybackStarted(channel)
+        isPlaying()
+    }
+
+    fun stopPlayback() {
+        playerFragment.stopPlayback()
+    }
+
+    fun playbackQuality() = playerFragment.playbackQuality()
+
+    fun upgradeSource(channel: TVViewModel, source: Int) {
+        playerFragment.upgradeSource(channel, source)
+    }
+
+    fun cancelSourceUpgrade() {
+        playerFragment.cancelSourceUpgrade()
+    }
+
+    fun onSourceUpgradeReady(channel: TVViewModel, source: Int) {
+        mainFragment.onSourceUpgradeReady(channel, source)
+    }
+
+    fun onSourceUpgradeFailed(channel: TVViewModel, source: Int, reason: String) {
+        mainFragment.onSourceUpgradeFailed(channel, source, reason)
+    }
+
+    fun selectSource(channelId: Int, source: Int) {
+        mainFragment.selectSource(channelId, source)
+    }
+
+    private fun showSourceSelection() {
+        if (supportFragmentManager.isStateSaved || settingFragment.isVisible ||
+            supportFragmentManager.findFragmentByTag(SourceSelectionFragment.TAG) != null) return
+        SourceSelectionFragment().show(supportFragmentManager, SourceSelectionFragment.TAG)
     }
 
     private fun prevSource() {
@@ -155,7 +234,6 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
 
         if (mainFragment.isHidden) {
             transaction.show(mainFragment)
-            mainActive()
         } else {
             transaction.hide(mainFragment)
         }
@@ -163,15 +241,9 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
         transaction.commit()
     }
 
-    fun mainActive() {
-        handler.removeCallbacks(hideMain)
-        handler.postDelayed(hideMain, delayHideMain)
-    }
-
     fun settingDelayHide() {
         handler.removeCallbacks(hideSetting)
         handler.postDelayed(hideSetting, delayHideSetting)
-        showTime()
     }
 
     fun settingHideNow() {
@@ -181,12 +253,6 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
 
     fun settingNeverHide() {
         handler.removeCallbacks(hideSetting)
-    }
-
-    private val hideMain = Runnable {
-        if (!mainFragment.isHidden) {
-            supportFragmentManager.beginTransaction().hide(mainFragment).commit()
-        }
     }
 
     private fun mainFragmentIsHidden(): Boolean {
@@ -204,18 +270,9 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
     fun fragmentReady(tag: String) {
         ready++
         Log.i(TAG, "ready $tag $ready ")
-        if (ready == 6) {
+        touchControls?.bringToFront()
+        if (ready == 5) {
             mainFragment.fragmentReady()
-            showTime()
-        }
-    }
-
-    private fun showTime() {
-        Log.i(TAG, "showTime ${SP.time}")
-        if (SP.time) {
-            timeFragment.show()
-        } else {
-            timeFragment.hide()
         }
     }
 
@@ -228,13 +285,17 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
     }
 
     override fun onTouchEvent(event: MotionEvent?): Boolean {
-        if (event != null) {
-            gestureDetector.onTouchEvent(event)
-        }
+        if (event != null && gestureDetector.onTouchEvent(event)) return true
         return super.onTouchEvent(event)
     }
 
     private inner class GestureListener : GestureDetector.SimpleOnGestureListener() {
+
+        override fun onDown(e: MotionEvent): Boolean = true
+
+        override fun onLongPress(e: MotionEvent) {
+            showSourceSelection()
+        }
 
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
             switchMainFragment()
@@ -440,12 +501,10 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
                 return true
             }
 
-            KeyEvent.KEYCODE_ENTER -> {
-                switchMainFragment()
-            }
-
-            KeyEvent.KEYCODE_DPAD_CENTER -> {
-                switchMainFragment()
+            KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_DPAD_CENTER -> {
+                // Channel rows keep their normal confirmation behavior while browsing.
+                if (mainFragment.isHidden && event?.repeatCount == 0) showSourceSelection()
+                return true
             }
 
             KeyEvent.KEYCODE_DPAD_UP -> {
@@ -492,15 +551,11 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
     override fun onResume() {
         Log.i(TAG, "onResume")
         super.onResume()
-        if (!mainFragment.isHidden) {
-            handler.postDelayed(hideMain, delayHideMain)
-        }
     }
 
     override fun onPause() {
         Log.i(TAG, "onPause")
         super.onPause()
-        handler.removeCallbacks(hideMain)
     }
 
     override fun onDestroy() {
