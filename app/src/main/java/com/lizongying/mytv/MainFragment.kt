@@ -54,10 +54,8 @@ class MainFragment : Fragment() {
 
     private var itemPosition = 0
     private val playbackHandler = Handler(Looper.getMainLooper())
-    private val failedChannels = mutableSetOf<Int>()
     private var pendingChannel: TVViewModel? = null
-    private var qualityJob: Job? = null
-    private var refreshJob: Job? = null
+    private var handlingFailure = false
     private var dataRefreshJob: Job? = null
     private var lastSubscriptionRefresh = 0L
     private var lastEpgRefresh = 0L
@@ -66,11 +64,7 @@ class MainFragment : Fragment() {
     private var restoringMenu = false
     private var deferredActiveTV: TV? = null
     private var sourceOrder: List<Int> = emptyList()
-    private val failedSources = mutableSetOf<Int>()
-    private var sourceRanking: SourceQualityResolver.Ranking? = null
-    private var upgradingSource: Int? = null
-    private var manuallySelectedSource = false
-    private var lastUpgradeAt = -60_000L
+    private val sourceFailures = com.lizongying.mytv.playlist.SourceFailures()
     private val playbackTimeout = Runnable {
         pendingChannel?.let { onPlaybackFailed(it, "播放加载超时") }
     }
@@ -224,9 +218,13 @@ class MainFragment : Fragment() {
     private fun onChannelSelected(position: Int) {
         Log.i(TAG, "onChannelSelected: $position")
         currentChannelIndex = position
-        if (position < channels.size) {
+        if (position in channels.indices) {
             val tvViewModel = channels[position]
             selectPlayback(tvViewModel.getTV().id)
+            val mainActivity = activity as? MainActivity
+            if (mainActivity?.isTelevision == true || channelList.isInTouchMode == false) {
+                mainActivity?.hideMainFragment()
+            }
         }
     }
 
@@ -342,11 +340,7 @@ class MainFragment : Fragment() {
             return
         }
         if (source !in channel.videoUrl.value.orEmpty().indices) return
-        manuallySelectedSource = true
-        (activity as? MainActivity)?.cancelSourceUpgrade()
-        upgradingSource = null
-        failedSources.remove(source)
-        if (channel.videoIndex.value == source) return
+        sourceFailures.clear()
         channel.setVideoIndex(source)
         Log.i(TAG, "manual source selection: ${channel.getTV().title}, source=$source")
         selectPlayback(itemPosition, automatic = true)
@@ -355,9 +349,6 @@ class MainFragment : Fragment() {
     private fun selectPlayback(position: Int, automatic: Boolean = false) {
         if (position !in 0 until tvListViewModel.size()) return
         val channel = tvListViewModel.getTVViewModel(position) ?: return
-        if (!automatic) {
-            failedChannels.clear()
-        }
         val previous = tvListViewModel.getTVViewModelCurrent()
         if (previous !== channel) {
             deferredActiveTV?.let { previous?.updateTV(it) }
@@ -365,36 +356,39 @@ class MainFragment : Fragment() {
         }
         val newChannel = previous !== channel || !automatic
         if (newChannel) {
-            manuallySelectedSource = false
-            lastUpgradeAt = -60_000L
-            qualityJob?.cancel()
-            qualityJob = null
-            sourceRanking = null
-            failedSources.clear()
+            sourceFailures.clear()
         }
-        (activity as? MainActivity)?.cancelSourceUpgrade()
-        upgradingSource = null
         itemPosition = position
         tvListViewModel.setItemPosition(position)
         pendingChannel = channel
-        playbackHandler.removeCallbacks(playbackTimeout)
+        handlingFailure = false
+        playbackHandler.removeCallbacksAndMessages(null)
         channels.indexOf(channel).takeIf { it >= 0 }?.let {
             currentChannelIndex = it
             channelAdapter.setSelected(it)
         }
         if (newChannel) {
             val urls = channel.videoUrl.value.orEmpty()
-            val cached = SourceQualityResolver.cachedRanking(requireContext(), urls)
-            sourceRanking = cached
+            val cached = SourceQualityResolver.preferYangshipin(
+                SourceQualityResolver.cachedRanking(requireContext(), urls), channel.getTV().sourceNames)
             sourceOrder = cached.order
-            channel.setVideoIndex(cached.order.firstOrNull() ?: 0)
+            val preferred = cached.order.firstOrNull { !cached.qualities[it].failed }
+            if (preferred == null) {
+                pendingChannel = null
+                (activity as? MainActivity)?.stopPlayback()
+                Toast.makeText(context, "该频道来源暂时不可用，请稍后重试或手动选源", Toast.LENGTH_LONG).show()
+                return
+            }
+            channel.setVideoIndex(preferred)
         }
-        // Use the best cached source immediately; unknown sources are checked in the background.
+        // Read historical playback results only; never probe an unselected source.
         playbackHandler.postDelayed(playbackTimeout, PLAYBACK_TIMEOUT_MS)
         channel.changed()
     }
 
     fun onPlaybackFailed(channel: TVViewModel, reason: String) {
+        if (handlingFailure) return
+        handlingFailure = true
         val failedSource = channel.videoIndex.value
         // Defer the switch so empty URLs cannot recurse through LiveData observers.
         playbackHandler.post {
@@ -404,32 +398,31 @@ class MainFragment : Fragment() {
             }
             Log.w(TAG, "source failed: ${channel.getTV().title}, source=${channel.videoIndex.value}, $reason")
             channel.videoIndex.value?.let {
-                failedSources.add(it)
+                sourceFailures.playbackFailed(it)
                 channel.videoUrl.value?.getOrNull(it)?.let { url ->
-                    SourceQualityResolver.markFailed(requireContext(), url)
+                    SourceQualityResolver.markFailed(requireContext(), url, reason)
                 }
             }
-            val nextSource = sourceOrder.firstOrNull { it !in failedSources }
-            if (nextSource != null) {
-                channel.setVideoIndex(nextSource)
-                Log.i(TAG, "trying alternative source $nextSource for ${channel.getTV().title}")
-                selectPlayback(itemPosition, automatic = true)
-                return@post
-            }
-            if (!failedChannels.add(itemPosition)) return@post
-            pendingChannel = null
             playbackHandler.removeCallbacks(playbackTimeout)
-            val size = tvListViewModel.size()
-            val nextPosition = (1 until size)
-                .map { (itemPosition + it) % size }
-                .firstOrNull { it !in failedChannels }
-            if (nextPosition == null) {
-                (activity as? MainActivity)?.stopPlayback()
-                Toast.makeText(context, "所有频道均无法播放，请检查网络或直播源", Toast.LENGTH_LONG).show()
+            pendingChannel = null
+            (activity as? MainActivity)?.stopPlayback()
+            val urls = channel.videoUrl.value.orEmpty()
+            val eligible = sourceOrder.filter { index ->
+                urls.getOrNull(index)?.let { !SourceQualityResolver.isCoolingDown(requireContext(), it) } == true
+            }
+            val nextSource = sourceFailures.nextPlayback(eligible, urls.size, eligible.toSet())
+            if (nextSource != null) {
+                val waitMs = sourceFailures.retryDelayMs()
+                Log.i(TAG, "retry same channel source=$nextSource after ${waitMs}ms")
+                playbackHandler.postDelayed({
+                    if (isResumed && tvListViewModel.getTVViewModelCurrent() === channel &&
+                        channel.videoIndex.value == failedSource) {
+                        channel.setVideoIndex(nextSource)
+                        selectPlayback(itemPosition, automatic = true)
+                    }
+                }, waitMs)
             } else {
-                Log.i(TAG, "auto switch to channel $nextPosition")
-                tvListViewModel.getTVViewModel(nextPosition)?.setVideoIndex(0)
-                selectPlayback(nextPosition, automatic = true)
+                Toast.makeText(context, "当前频道播放失败，已停止自动重试，请稍后重试或手动选源", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -438,80 +431,12 @@ class MainFragment : Fragment() {
         if (tvListViewModel.getTVViewModelCurrent() !== channel) return
         pendingChannel = null
         playbackHandler.removeCallbacks(playbackTimeout)
-        startQualityRefresh()
         Log.i(TAG, "playing ${channel.getTV().title}, source=${channel.videoIndex.value}")
-        if (channel.getTV().programType == ProgramType.M3U && sourceOrder.size > 1) {
-            if (qualityJob == null) {
-                qualityJob = viewLifecycleOwner.lifecycleScope.launch {
-                    val ranking = SourceQualityResolver.rank(requireContext(), channel.videoUrl.value.orEmpty())
-                    if (tvListViewModel.getTVViewModelCurrent() !== channel) return@launch
-                    sourceRanking = ranking
-                    sourceOrder = ranking.order
-                    upgradeQuality(channel)
-                }
-            } else {
-                upgradeQuality(channel)
-            }
-        }
-    }
-
-    private fun upgradeQuality(channel: TVViewModel) {
-        if (manuallySelectedSource || !isResumed || tvListViewModel.getTVViewModelCurrent() !== channel ||
-            pendingChannel != null || upgradingSource != null ||
-            SystemClock.elapsedRealtime() - lastUpgradeAt < 60_000) return
-        val ranking = sourceRanking ?: return
-        val currentIndex = channel.videoIndex.value ?: return
-        val advertised = ranking.qualities.getOrNull(currentIndex) ?: return
-        val measured = (activity as? MainActivity)?.playbackQuality()?.takeIf { it.pixels > 0 }
-        val currentPixels = measured?.pixels ?: advertised.pixels
-        val better = ranking.order.firstOrNull { index ->
-            val quality = ranking.qualities[index]
-            index != currentIndex && index !in failedSources && !quality.failed &&
-                (quality.pixels > currentPixels ||
-                    (quality.pixels == currentPixels && quality.pixels > 0 &&
-                        advertised.loadMs != Long.MAX_VALUE &&
-                        advertised.loadMs - quality.loadMs >= 500 &&
-                        quality.loadMs <= advertised.loadMs * 3 / 4 && !advertised.failed))
-        } ?: return
-        upgradingSource = better
-        Log.i(TAG, "background upgrade: ${channel.getTV().title}, source=$better")
-        (activity as? MainActivity)?.upgradeSource(channel, better)
-    }
-
-    fun onSourceUpgradeFailed(channel: TVViewModel, source: Int, reason: String) {
-        if (tvListViewModel.getTVViewModelCurrent() !== channel || upgradingSource != source) return
-        upgradingSource = null
-        failedSources.add(source)
-        channel.videoUrl.value?.getOrNull(source)?.let {
-            SourceQualityResolver.markFailed(requireContext(), it)
-        }
-        Log.w(TAG, "upgrade failed, keep current source: $source, $reason")
-        playbackHandler.post { upgradeQuality(channel) }
-    }
-
-    fun onSourceUpgradeReady(channel: TVViewModel, source: Int) {
-        if (tvListViewModel.getTVViewModelCurrent() !== channel || upgradingSource != source) return
-        upgradingSource = null
-        channel.setVideoIndex(source)
-        lastUpgradeAt = SystemClock.elapsedRealtime()
-        Log.i(TAG, "upgrade complete: ${channel.getTV().title}, source=$source")
-    }
-
-    private fun startQualityRefresh() {
-        if (refreshJob?.isActive == true || !isResumed) return
-        val context = requireContext().applicationContext
-        val urls = tvListViewModel.tvListViewModel.value.orEmpty()
-            .map { it.videoUrl.value.orEmpty().toList() }
-        refreshJob = viewLifecycleOwner.lifecycleScope.launch {
-            SourceQualityResolver.refresh(context, urls) { checkedUrls, ranking ->
-                val current = tvListViewModel.getTVViewModelCurrent()
-                if (current != null && current.videoUrl.value == checkedUrls) {
-                    sourceRanking = ranking
-                    sourceOrder = ranking.order
-                    upgradeQuality(current)
-                }
-            }
-        }
+        // Reset the retry budget only after sustained playback, not a transient READY event.
+        playbackHandler.postDelayed({
+            if (!handlingFailure && pendingChannel == null &&
+                tvListViewModel.getTVViewModelCurrent() === channel) sourceFailures.clear()
+        }, 60_000)
     }
 
     private fun startDataRefresh() {
@@ -549,13 +474,7 @@ class MainFragment : Fragment() {
         val playingUrl = current?.videoUrl?.value?.getOrNull(current.videoIndex.value ?: 0)
         val previousPending = pendingChannel
         pendingChannel = null
-        qualityJob?.cancel()
-        qualityJob = null
-        refreshJob?.cancel()
-        refreshJob = null
-        (activity as? MainActivity)?.cancelSourceUpgrade()
-        upgradingSource = null
-        failedSources.clear()
+        sourceFailures.clear()
         val rebuilt = snapshot.groups.values.flatten().distinctBy { it.id }.map { tv ->
             val existing = old[ChannelIdentity.key(tv.title)]
             if (existing != null && existing === current && playingUrl != null && playingUrl !in tv.videoUrl) {
@@ -581,8 +500,11 @@ class MainFragment : Fragment() {
         tvListViewModel.replaceChannels(rebuilt, position)
         itemPosition = position
         (activity as? MainActivity)?.syncSourceIndex(current)
-        sourceRanking = current?.let { SourceQualityResolver.cachedRanking(requireContext(), it.videoUrl.value.orEmpty()) }
-        sourceOrder = sourceRanking?.order.orEmpty()
+        sourceOrder = current?.let {
+            SourceQualityResolver.preferYangshipin(
+                SourceQualityResolver.cachedRanking(requireContext(), it.videoUrl.value.orEmpty()),
+                it.getTV().sourceNames).order
+        }.orEmpty()
         groups = TVList.list.keys.toList()
         groupAdapter.submitList(groups)
         currentGroupIndex = groups.indexOf(groupName).coerceAtLeast(0)
@@ -590,7 +512,6 @@ class MainFragment : Fragment() {
         pendingChannel = previousPending?.takeIf { it in rebuilt }
         locateCurrentChannel(requestFocus = channelList.hasFocus())
         rebuilt.forEach { updateEPG(it) }
-        startQualityRefresh()
         Log.i(TAG, "subscription refreshed without restarting playback: ${rebuilt.size} channels")
     }
 
@@ -633,7 +554,6 @@ class MainFragment : Fragment() {
         Log.i(TAG, "onResume")
         super.onResume()
         if (tvListViewModel.size() > 0) {
-            startQualityRefresh()
             startDataRefresh()
         }
         if (pendingChannel != null) {
@@ -647,12 +567,6 @@ class MainFragment : Fragment() {
         super.onStop()
         dataRefreshJob?.cancel()
         dataRefreshJob = null
-        qualityJob?.cancel()
-        qualityJob = null
-        refreshJob?.cancel()
-        refreshJob = null
-        (activity as? MainActivity)?.cancelSourceUpgrade()
-        upgradingSource = null
         playbackHandler.removeCallbacksAndMessages(null)
         SP.itemPosition = itemPosition
         tvListViewModel.getTVViewModelCurrent()?.let {

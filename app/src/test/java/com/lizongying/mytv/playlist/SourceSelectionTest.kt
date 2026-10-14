@@ -9,6 +9,64 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
 class SourceSelectionTest {
+    @Test fun prefersYangshipinBeforeHigherResolutionAndPreservesFallbackOrder() {
+        val qualities = listOf(
+            SourceQualityResolver.Quality(pixels = 3840L * 2160),
+            SourceQualityResolver.Quality(pixels = 1280L * 720),
+            SourceQualityResolver.Quality(pixels = 1920L * 1080),
+        )
+        val ranked = SourceQualityResolver.ranking(qualities)
+        assertEquals(listOf(1, 0, 2), SourceQualityResolver.preferYangshipin(
+            ranked, listOf("咪咕", "央视频", "电信")).order)
+        assertEquals(ranked.order, SourceQualityResolver.preferYangshipin(ranked, emptyList()).order)
+        val failed = SourceQualityResolver.preferYangshipin(
+            SourceQualityResolver.ranking(listOf(qualities[0], qualities[1].copy(failed = true))),
+            listOf("咪咕", "央视频"))
+        assertEquals(0, failed.order.first { !failed.qualities[it].failed })
+    }
+
+    @Test fun fallbackStopsAfterThreeFailuresAndSkipsCoolingSources() {
+        val failures = SourceFailures()
+        failures.playbackFailed(0)
+        assertEquals(3000L, failures.retryDelayMs())
+        assertEquals(2, failures.nextPlayback(listOf(0, 1, 2, 3), 4, setOf(2, 3)))
+        failures.playbackFailed(2)
+        assertEquals(6000L, failures.retryDelayMs())
+        assertEquals(3, failures.nextPlayback(listOf(0, 1, 2, 3), 4, setOf(3)))
+        failures.playbackFailed(3)
+        assertEquals(null, failures.nextPlayback(listOf(0, 1, 2, 3), 4))
+        failures.clear()
+        assertEquals(0, failures.nextPlayback(listOf(0), 4))
+    }
+
+    @Test fun resolutionSurvivesCooldownWithoutClaimingCurrentAvailability() {
+        val failed = SourceQualityResolver.Quality(pixels = 1920L * 1080, width = 1920,
+            height = 1080, failed = true, playbackFailed = true)
+        assertTrue(SourceQualityResolver.historicalQuality(failed, 599_999).failed)
+        val history = SourceQualityResolver.historicalQuality(failed, 600_000)
+        assertFalse(history.failed)
+        assertFalse(history.playbackFailed)
+        assertEquals(1920, history.width)
+        assertEquals(1080, history.height)
+    }
+
+    @Test fun firstFrameTimingUsesActualPlaybackRatherThanPreviousProbe() {
+        assertEquals(650L, SourceQualityResolver.recoveredQuality(
+            SourceQualityResolver.Quality(loadMs = 650), SourceQualityResolver.Quality(loadMs = 800)
+        ).loadMs)
+    }
+
+    @Test fun successfulPlaybackClearsBothFailureFlagsAndKeepsLoadTime() {
+        val result = SourceQualityResolver.recoveredQuality(
+            SourceQualityResolver.Quality(pixels = 1920L * 1080, width = 1920, height = 1080),
+            SourceQualityResolver.Quality(failed = true, playbackFailed = true, loadMs = 800),
+        )
+        assertFalse(result.failed)
+        assertFalse(result.playbackFailed)
+        assertEquals(1920, result.width)
+        assertEquals(800L, result.loadMs)
+    }
+
     @Test fun sourceLabelsPreferMetadataAndKeepUrlOrder() {
         val groups = TVList.build(listOf(
             M3UChannel("江西卫视", "https://example.com/one", "卫视", "", "", "咪咕"),

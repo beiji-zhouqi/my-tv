@@ -3,6 +3,26 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+// APK metadata has one source, independent of Git tags.
+def appVersion = new groovy.json.JsonSlurper().parse(rootProject.file('version.json'))
+
+// Local subscription settings are excluded from Git; see iptv.properties.example.
+def iptvConfigFile = rootProject.file('iptv.properties')
+if (!iptvConfigFile.isFile()) {
+    throw new GradleException('Missing iptv.properties. Copy iptv.properties.example and configure your subscription URLs.')
+}
+def iptvConfig = new Properties()
+iptvConfigFile.withInputStream { iptvConfig.load(it) }
+def subscriptionUrl = iptvConfig.getProperty('subscription.url', '').trim()
+def epgUrl = iptvConfig.getProperty('epg.url', '').trim()
+['subscription.url': subscriptionUrl, 'epg.url': epgUrl].each { key, value ->
+    def uri = null
+    try { uri = new URI(value) } catch (URISyntaxException ignored) { }
+    if (!(uri?.scheme in ['http', 'https']) || !uri?.host) {
+        throw new GradleException("Configure a valid HTTP/HTTPS URL for ${key} in iptv.properties.")
+    }
+}
+
 android {
     namespace 'com.lizongying.mytv'
     compileSdk 34
@@ -10,6 +30,10 @@ android {
 
     viewBinding {
         enabled = true
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     signingConfigs {
@@ -25,8 +49,10 @@ android {
         applicationId "com.lizongying.mytv"
         minSdk 21
         targetSdk 33
-        versionCode VersionCode()
-        versionName VersionName()
+        versionCode (appVersion.version_code as int)
+        versionName appVersion.version_name
+        buildConfigField 'String', 'SUBSCRIPTION_URL', groovy.json.JsonOutput.toJson(subscriptionUrl)
+        buildConfigField 'String', 'EPG_URL', groovy.json.JsonOutput.toJson(epgUrl)
 
         // This block is different from the one you use to link Gradle
         // to your CMake or ndk-build script.
@@ -77,31 +103,6 @@ android {
             // Provides a relative path to your CMake build script.
             path = file("CMakeLists.txt")
         }
-    }
-}
-
-static def VersionCode() {
-    try {
-        def p = "git describe --tags --always"
-        def process = p.execute()
-        process.waitFor()
-        def replace = [v: "", ".": " ", "-": " "]
-        def arr = (process.text.trim().replace(replace) + " 0").split(" ")
-        def versionCode = arr[0].toInteger() * 16777216 + arr[1].toInteger() * 65536 + arr[2].toInteger() * 256 + arr[3].toInteger()
-        println("VersionCode $versionCode")
-        return versionCode
-    } catch (ignored) {
-        return 0
-    }
-}
-
-static def VersionName() {
-    try {
-        def process = "git describe --tags --always".execute()
-        process.waitFor()
-        return process.text.trim() - "v"
-    } catch (ignored) {
-        return "1.0.0"
     }
 }
 

@@ -2,6 +2,7 @@ package com.lizongying.mytv.playlist
 
 import android.content.Context
 import android.util.Log
+import com.lizongying.mytv.BuildConfig
 import java.io.File
 import java.security.MessageDigest
 import okhttp3.OkHttpClient
@@ -19,8 +20,8 @@ object PlaylistRepository {
     private const val TAG = "PlaylistRepository"
 
     /** Channel list endpoint. */
-    const val DEFAULT_URL = "http://192.168.9.102:1905/iptvadmin/interface.m3u"
-    const val DEFAULT_EPG_URL = "http://192.168.9.102:1905/iptvadmin/playback.xml"
+    const val DEFAULT_URL = BuildConfig.SUBSCRIPTION_URL
+    const val DEFAULT_EPG_URL = BuildConfig.EPG_URL
 
     private const val TIMEOUT_CONNECT_SECONDS = 10L
     private const val TIMEOUT_READ_SECONDS = 20L

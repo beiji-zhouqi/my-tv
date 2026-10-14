@@ -21,6 +21,15 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Configure IPTV endpoints
+        env:
+          IPTV_SUBSCRIPTION_URL: ${{ secrets.IPTV_SUBSCRIPTION_URL }}
+          IPTV_EPG_URL: ${{ secrets.IPTV_EPG_URL }}
+        run: |
+          : "${IPTV_SUBSCRIPTION_URL:?Set the IPTV_SUBSCRIPTION_URL repository secret}"
+          : "${IPTV_EPG_URL:?Set the IPTV_EPG_URL repository secret}"
+          printf '%s\n' "subscription.url=$IPTV_SUBSCRIPTION_URL" "epg.url=$IPTV_EPG_URL" > iptv.properties
+
       - name: Run build with Gradle wrapper
         run: ./gradlew assembleRelease -PIS_SO_BUILD=false
 

@@ -43,10 +43,12 @@ class SourceSelectionFragment : DialogFragment() {
             val measured = if (index == current) (activity as? MainActivity)?.playbackQuality() else null
             val actual = measured?.takeIf { it.width > 0 && it.height > 0 } ?: quality
             val description = when {
+                quality.failed && index != current -> "播放失败，点击重试"
                 actual.width > 0 && actual.height > 0 -> "${actual.width} × ${actual.height}" +
-                    (if (index == current && measured === actual) " · 实时" else " · 检测值")
-                quality.failed -> "上次未能播放，可重试"
-                else -> "分辨率待检测"
+                    (if (index == current && measured === actual) " · 实时" else " · 历史播放")
+                quality.failed && quality.playbackFailed -> "播放失败，点击重试"
+                quality.failed -> "暂无播放记录"
+                else -> "尚未播放，分辨率未知"
             }
             val name = channel?.getTV()?.sourceNames?.getOrNull(index)?.takeIf { it.isNotBlank() }
                 ?: "直播源"

@@ -195,22 +195,6 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
 
     fun playbackQuality() = playerFragment.playbackQuality()
 
-    fun upgradeSource(channel: TVViewModel, source: Int) {
-        playerFragment.upgradeSource(channel, source)
-    }
-
-    fun cancelSourceUpgrade() {
-        playerFragment.cancelSourceUpgrade()
-    }
-
-    fun onSourceUpgradeReady(channel: TVViewModel, source: Int) {
-        mainFragment.onSourceUpgradeReady(channel, source)
-    }
-
-    fun onSourceUpgradeFailed(channel: TVViewModel, source: Int, reason: String) {
-        mainFragment.onSourceUpgradeFailed(channel, source, reason)
-    }
-
     fun selectSource(channelId: Int, source: Int) {
         mainFragment.selectSource(channelId, source)
     }
@@ -259,7 +243,7 @@ class MainActivity : FragmentActivity(), Request.RequestListener {
         return mainFragment.isHidden
     }
 
-    private fun hideMainFragment() {
+    fun hideMainFragment() {
         if (!mainFragment.isHidden) {
             supportFragmentManager.beginTransaction()
                 .hide(mainFragment)

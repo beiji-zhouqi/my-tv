@@ -1,0 +1,4 @@
+# Copy to iptv.properties and replace these example URLs.
+# iptv.properties is local only and ignored by Git.
+subscription.url=https://example.com/iptv/interface.m3u
+epg.url=https://example.com/iptv/playback.xml

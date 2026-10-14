@@ -25,25 +25,19 @@ import com.google.android.exoplayer2.SimpleExoPlayer
 import com.lizongying.mytv.databinding.PlayerBinding
 import com.lizongying.mytv.models.ProgramType
 import com.lizongying.mytv.models.TVViewModel
-import com.lizongying.mytv.playlist.UpgradeStability
 import com.lizongying.mytv.playlist.SourceQualityResolver
 
 @OptIn(UnstableApi::class)
 class PlayerFragment : Fragment(), SurfaceHolder.Callback {
     private var binding: PlayerBinding? = null
     private var playerView: PlayerView? = null
-    private var standbyView: PlayerView? = null
     private var tvViewModel: TVViewModel? = null
     private var activeSource = 0
+    private var playbackStartedAt = 0L
+    private var recordedFirstFrame = false
     private lateinit var surfaceView: SurfaceView
     private var exoPlayer: SimpleExoPlayer? = null
-    private var upgradePlayer: ExoPlayer? = null
-    private var legacyUpgradePlayer: SimpleExoPlayer? = null
     private val handler = Handler(Looper.getMainLooper())
-    private var upgradeTimeout: Runnable? = null
-    private var upgradeStabilityCheck: Runnable? = null
-    private var legacyProbeSurface: android.view.Surface? = null
-    private var legacyProbeTexture: android.graphics.SurfaceTexture? = null
     private var lastPosition = -1L
     private var lastProgressAt = 0L
     private var monitoring = false
@@ -109,10 +103,9 @@ class PlayerFragment : Fragment(), SurfaceHolder.Callback {
             surfaceView.holder.addCallback(this)
         } else {
             views.surfaceView.visibility = View.GONE
+            views.standbyPlayerView.visibility = View.GONE
             playerView = views.playerView
-            standbyView = views.standbyPlayerView
             playerView?.setKeepContentOnPlayerReset(true)
-            standbyView?.setKeepContentOnPlayerReset(true)
             val player = newPlayer()
             playerView?.player = player
             player.addListener(foregroundListener(player))
@@ -132,7 +125,33 @@ class PlayerFragment : Fragment(), SurfaceHolder.Callback {
         return ExoPlayer.Builder(requireContext()).setTrackSelector(selector).build()
     }
 
+    private fun recordPlayingSource() {
+        if (recordedFirstFrame) return
+        val channel = tvViewModel ?: return
+        if (channel.videoIndex.value != activeSource) return
+        val url = channel.videoUrl.value?.getOrNull(activeSource) ?: return
+        val measured = playbackQuality()
+        if (measured.width <= 0 || measured.height <= 0) return
+        context?.let {
+            recordedFirstFrame = true
+            SourceQualityResolver.markPlaying(it, url, measured.copy(
+                loadMs = (SystemClock.elapsedRealtime() - playbackStartedAt).coerceAtLeast(0)))
+        }
+    }
+
     private fun foregroundListener(player: ExoPlayer) = object : Player.Listener {
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            if (playbackState == Player.STATE_ENDED && playerView?.player === player && player.playWhenReady) {
+                tvViewModel?.takeIf { it.videoIndex.value == activeSource }?.let {
+                    (activity as? MainActivity)?.onPlaybackFailed(it, "直播源已结束")
+                }
+            }
+        }
+
+        override fun onRenderedFirstFrame() {
+            if (playerView?.player === player) recordPlayingSource()
+        }
+
         override fun onVideoSizeChanged(videoSize: VideoSize) {
             if (playerView?.player === player) {
                 Log.i(TAG, "video size: ${videoSize.width}x${videoSize.height}")
@@ -171,10 +190,11 @@ class PlayerFragment : Fragment(), SurfaceHolder.Callback {
     }
 
     fun play(channel: TVViewModel) {
-        cancelSourceUpgrade()
         tvViewModel = channel
         activeSource = channel.videoIndex.value ?: 0
         resetStallMonitor()
+        playbackStartedAt = SystemClock.elapsedRealtime()
+        recordedFirstFrame = false
         try {
             playerView?.player?.run {
                 setMediaItem(mediaItem(channel, activeSource))
@@ -227,85 +247,6 @@ class PlayerFragment : Fragment(), SurfaceHolder.Callback {
         )
     }
 
-    fun upgradeSource(channel: TVViewModel, source: Int) {
-        cancelSourceUpgrade()
-        if (tvViewModel !== channel || !isResumed) {
-            (activity as? MainActivity)?.onSourceUpgradeFailed(channel, source, "频道已切换")
-            return
-        }
-        if (playerView == null) {
-            upgradeLegacySource(channel, source)
-            return
-        }
-        val candidateView = standbyView ?: return
-        val candidate = newPlayer()
-        upgradePlayer = candidate
-        candidateView.alpha = 0f
-        candidateView.player = candidate
-        candidate.volume = 0f
-        lateinit var listener: Player.Listener
-        listener = object : Player.Listener {
-            override fun onRenderedFirstFrame() {
-                if (upgradePlayer !== candidate || tvViewModel !== channel || !isResumed) return
-                awaitStableCandidate(
-                    active = { upgradePlayer === candidate && tvViewModel === channel && isResumed },
-                    playing = { candidate.isPlaying },
-                    position = { candidate.currentPosition },
-                    buffered = { candidate.totalBufferedDuration },
-                ) {
-                    val size = candidate.videoSize
-                    val currentQuality = playbackQuality()
-                    if (size.width.toLong() * size.height < currentQuality.pixels) {
-                        cancelSourceUpgrade()
-                        (activity as? MainActivity)?.onSourceUpgradeFailed(channel, source, "候选源实际分辨率较低")
-                        return@awaitStableCandidate
-                    }
-                    val oldView = playerView ?: return@awaitStableCandidate
-                    val oldPlayer = oldView.player
-                    clearUpgradeTimeout()
-                    upgradePlayer = null
-                    candidate.removeListener(listener)
-                    oldPlayer?.volume = 0f
-                    playerView = candidateView
-                    standbyView = oldView
-                    activeSource = source
-                    resetStallMonitor()
-                    markPlaying()
-                    (activity as? MainActivity)?.onSourceUpgradeReady(channel, source)
-                    candidate.addListener(foregroundListener(candidate))
-                    candidateView.bringToFront()
-                    candidateView.alpha = 1f
-                    candidate.volume = 1f
-                    oldView.alpha = 0f
-                    oldView.player = null
-                    oldPlayer?.release()
-                    Log.i(TAG, "stable candidate ready, switch source=$source")
-                    Log.i(TAG, "video size: ${size.width}x${size.height}")
-                    (activity as? MainActivity)?.onPlaybackStarted(channel)
-                }
-            }
-
-            override fun onPlayerError(error: PlaybackException) {
-                if (upgradePlayer !== candidate) return
-                cancelSourceUpgrade()
-                (activity as? MainActivity)?.onSourceUpgradeFailed(
-                    channel, source, error.message ?: "升级源不可播放"
-                )
-            }
-        }
-        candidate.addListener(listener)
-        scheduleUpgradeTimeout(channel, source)
-        try {
-            candidate.setMediaItem(mediaItem(channel, source))
-            candidate.prepare()
-            candidate.play()
-        } catch (error: Exception) {
-            cancelSourceUpgrade()
-            (activity as? MainActivity)?.onSourceUpgradeFailed(channel, source,
-                error.message ?: "播放格式不支持")
-        }
-    }
-
     private fun newLegacyPlayer(): SimpleExoPlayer {
         val selector = com.google.android.exoplayer2.trackselection.DefaultTrackSelector(requireContext())
         selector.setParameters(selector.buildUponParameters()
@@ -318,6 +259,15 @@ class PlayerFragment : Fragment(), SurfaceHolder.Callback {
 
     private fun legacyListener(player: SimpleExoPlayer) =
         object : com.google.android.exoplayer2.Player.EventListener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == com.google.android.exoplayer2.Player.STATE_ENDED &&
+                    exoPlayer === player && player.playWhenReady) {
+                    tvViewModel?.takeIf { it.videoIndex.value == activeSource }?.let {
+                        (activity as? MainActivity)?.onPlaybackFailed(it, "直播源已结束")
+                    }
+                }
+            }
+
             override fun onPlayerError(error: com.google.android.exoplayer2.ExoPlaybackException) {
                 if (exoPlayer === player) {
                     tvViewModel?.takeIf { it.videoIndex.value == activeSource }?.let {
@@ -336,151 +286,18 @@ class PlayerFragment : Fragment(), SurfaceHolder.Callback {
             }
         }
 
-    private fun upgradeLegacySource(channel: TVViewModel, source: Int) {
-        val candidate = newLegacyPlayer()
-        legacyUpgradePlayer = candidate
-        legacyProbeTexture = android.graphics.SurfaceTexture(false)
-        legacyProbeSurface = android.view.Surface(legacyProbeTexture)
-        candidate.setVideoSurface(legacyProbeSurface)
-        candidate.volume = 0f
-        var rendered = false
-        lateinit var videoListener: com.google.android.exoplayer2.video.VideoListener
-        lateinit var listener: com.google.android.exoplayer2.Player.EventListener
-        listener = object : com.google.android.exoplayer2.Player.EventListener {
-            override fun onPlaybackStateChanged(state: Int) {
-                if (state != com.google.android.exoplayer2.Player.STATE_READY ||
-                    legacyUpgradePlayer !== candidate || tvViewModel !== channel || !isResumed || !rendered) return
-                awaitStableCandidate(
-                    active = { legacyUpgradePlayer === candidate && tvViewModel === channel && isResumed },
-                    playing = { candidate.isPlaying },
-                    position = { candidate.currentPosition },
-                    buffered = { candidate.totalBufferedDuration },
-                ) {
-                    val format = candidate.videoFormat
-                    val pixels = (format?.width ?: 0).toLong() * (format?.height ?: 0)
-                    if (pixels <= 0 || pixels < playbackQuality().pixels) {
-                        cancelSourceUpgrade()
-                        (activity as? MainActivity)?.onSourceUpgradeFailed(channel, source, "候选源实际分辨率不足")
-                        return@awaitStableCandidate
-                    }
-                    clearUpgradeTimeout()
-                    legacyUpgradePlayer = null
-                    candidate.removeListener(listener)
-                    candidate.removeVideoListener(videoListener)
-                    val old = exoPlayer
-                    old?.volume = 0f
-                    old?.clearVideoSurfaceHolder(surfaceView.holder)
-                    exoPlayer = candidate
-                    activeSource = source
-                    resetStallMonitor()
-                    markPlaying()
-                    (activity as? MainActivity)?.onSourceUpgradeReady(channel, source)
-                    candidate.addListener(legacyListener(candidate))
-                    candidate.setVideoSurfaceHolder(surfaceView.holder)
-                    releaseLegacyProbeSurface()
-                    candidate.volume = 1f
-                    candidate.play()
-                    old?.release()
-                }
-            }
-
-            override fun onPlayerError(error: com.google.android.exoplayer2.ExoPlaybackException) {
-                if (legacyUpgradePlayer !== candidate) return
-                cancelSourceUpgrade()
-                (activity as? MainActivity)?.onSourceUpgradeFailed(
-                    channel, source, error.message ?: "升级源不可播放"
-                )
-            }
-        }
-        videoListener = object : com.google.android.exoplayer2.video.VideoListener {
-            override fun onRenderedFirstFrame() {
-                rendered = true
-                listener.onPlaybackStateChanged(com.google.android.exoplayer2.Player.STATE_READY)
-            }
-        }
-        candidate.addVideoListener(videoListener)
-        candidate.addListener(listener)
-        scheduleUpgradeTimeout(channel, source)
-        try {
-            candidate.setMediaItem(legacyMediaItem(channel, source))
-            candidate.prepare()
-            candidate.play()
-        } catch (error: Exception) {
-            cancelSourceUpgrade()
-            (activity as? MainActivity)?.onSourceUpgradeFailed(channel, source,
-                error.message ?: "播放格式不支持")
-        }
-    }
-
-    private fun awaitStableCandidate(
-        active: () -> Boolean, playing: () -> Boolean, position: () -> Long,
-        buffered: () -> Long, commit: () -> Unit,
-    ) {
-        if (upgradeStabilityCheck != null) return
-        val gate = UpgradeStability()
-        val check = object : Runnable {
-            override fun run() {
-                if (!active()) return
-                if (gate.sample(SystemClock.elapsedRealtime(), position(), playing(), buffered())) {
-                    upgradeStabilityCheck = null
-                    Log.i(TAG, "candidate stable for 5 seconds, committing upgrade")
-                    commit()
-                } else {
-                    handler.postDelayed(this, 250)
-                }
-            }
-        }
-        upgradeStabilityCheck = check
-        handler.post(check)
-    }
-
-    private fun releaseLegacyProbeSurface() {
-        legacyProbeSurface?.release()
-        legacyProbeSurface = null
-        legacyProbeTexture?.release()
-        legacyProbeTexture = null
-    }
-
     fun syncSourceIndex(channel: TVViewModel) {
         if (tvViewModel === channel) activeSource = channel.videoIndex.value ?: 0
     }
 
-    private fun scheduleUpgradeTimeout(channel: TVViewModel, source: Int) {
-        upgradeTimeout = Runnable {
-            cancelSourceUpgrade()
-            (activity as? MainActivity)?.onSourceUpgradeFailed(channel, source, "升级源加载超时")
-        }.also { handler.postDelayed(it, 20_000) }
-    }
-
-    private fun clearUpgradeTimeout() {
-        upgradeTimeout?.let { handler.removeCallbacks(it) }
-        upgradeTimeout = null
-    }
-
-    fun cancelSourceUpgrade() {
-        clearUpgradeTimeout()
-        upgradeStabilityCheck?.let { handler.removeCallbacks(it) }
-        upgradeStabilityCheck = null
-        val candidate = upgradePlayer
-        upgradePlayer = null
-        standbyView?.player = null
-        standbyView?.alpha = 0f
-        candidate?.release()
-        val legacyCandidate = legacyUpgradePlayer
-        legacyUpgradePlayer = null
-        legacyCandidate?.release()
-        releaseLegacyProbeSurface()
-    }
-
     fun stopPlayback() {
         resetStallMonitor()
-        cancelSourceUpgrade()
-        playerView?.player?.stop()
-        exoPlayer?.stop()
+        playerView?.player?.clearMediaItems()
+        exoPlayer?.clearMediaItems()
     }
 
-    override fun onStart() {
-        super.onStart()
+    override fun onResume() {
+        super.onResume()
         handler.removeCallbacks(stallMonitor)
         handler.postDelayed(stallMonitor, 1_000)
         playerView?.player?.let {
@@ -498,20 +315,17 @@ class PlayerFragment : Fragment(), SurfaceHolder.Callback {
         super.onPause()
         handler.removeCallbacks(stallMonitor)
         resetStallMonitor()
-        cancelSourceUpgrade()
         playerView?.player?.pause()
         exoPlayer?.pause()
     }
 
     override fun onDestroyView() {
         handler.removeCallbacks(stallMonitor)
-        cancelSourceUpgrade()
         playerView?.player?.release()
         playerView?.player = null
         exoPlayer?.release()
         exoPlayer = null
         playerView = null
-        standbyView = null
         binding = null
         super.onDestroyView()
     }
@@ -520,6 +334,9 @@ class PlayerFragment : Fragment(), SurfaceHolder.Callback {
         exoPlayer?.release()
         exoPlayer = newLegacyPlayer().also {
             it.addListener(legacyListener(it))
+            it.addVideoListener(object : com.google.android.exoplayer2.video.VideoListener {
+                override fun onRenderedFirstFrame() { recordPlayingSource() }
+            })
             it.setVideoSurfaceHolder(holder)
         }
         tvViewModel?.let { play(it) }
